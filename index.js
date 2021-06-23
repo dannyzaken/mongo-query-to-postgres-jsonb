@@ -172,15 +172,15 @@ function convertOp(path, op, value, parent, arrayPaths) {
     case '$eq':  {
       const isSimpleComparision = (op === '$eq' || op === '$ne')
       const pathContainsArrayAccess = path.some((key) => /^\d+$/.test(key))
-      if (isSimpleComparision && !pathContainsArrayAccess) {
-        // create containment query since these can use GIN indexes
-        // See docs here, https://www.postgresql.org/docs/9.4/datatype-json.html#JSON-INDEXING
-        const [head, ...tail] = path
-        return `${op=='$ne' ? 'NOT ' : ''}${head} @> ` + util.pathToObject([...tail, value])
-      } else {
-        var text = util.pathToText(path, typeof value == 'string')
-        return text + OPS[op] + util.quote(value)
-      }
+      // if (isSimpleComparision && !pathContainsArrayAccess) {
+      //   // create containment query since these can use GIN indexes
+      //   // See docs here, https://www.postgresql.org/docs/9.4/datatype-json.html#JSON-INDEXING
+      //   const [head, ...tail] = path
+      //   return `${op=='$ne' ? 'NOT ' : ''}${head} @> ` + util.pathToObject([...tail, value])
+      // } else {
+      var text = util.pathToText(path, typeof value == 'string')
+      return text + OPS[op] + util.quote(value)
+      // }
     }
     case '$type': {
       const text = util.pathToText(path, false)
