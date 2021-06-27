@@ -34,7 +34,7 @@ function getMatchingArrayPath(op, arrayPaths) {
  * @param arrayPathStr
  * @returns {string|string|*}
  */
-function createElementOrArrayQuery(path, op, value, parent, arrayPathStr) {
+function createElementOrArrayQuery(path, op, value, parent, arrayPathStr, options) {
   const arrayPath = arrayPathStr.split('.')
   const deeperPath = op.split('.').slice(arrayPath.length)
   const innerPath = ['value', ...deeperPath]
@@ -52,30 +52,30 @@ function createElementOrArrayQuery(path, op, value, parent, arrayPathStr) {
     if (typeof value['$size'] !== 'undefined') {
       // size does not support array element based matching
     } else if (value['$elemMatch']) {
-      const sub = convert(innerPath, value['$elemMatch'], [], false)
+      const sub = convert(innerPath, value['$elemMatch'], [], false, options)
       arrayQuery = `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
       return arrayQuery
     } else if (value['$in']) {
-      const sub = convert(innerPath, value, [], true)
+      const sub = convert(innerPath, value, [], true, options)
       arrayQuery = `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
     } else if (value['$all']) {
       const cleanedValue = value['$all'].filter((v) => (v !== null && typeof v !== 'undefined'))
       arrayQuery = '(' + cleanedValue.map(function (subquery) {
-        const sub = convert(innerPath, subquery, [], false)
+        const sub = convert(innerPath, subquery, [], false, options)
         return `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
       }).join(' AND ') + ')'
     } else if (specialKeys.length === 0) {
-      const sub = convert(innerPath, value, [], true)
+      const sub = convert(innerPath, value, [], true, options)
       arrayQuery = `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
     } else {
       const params = value
       arrayQuery = '(' + Object.keys(params).map(function (subKey) {
-        const sub = convert(innerPath, { [subKey]: params[subKey] }, [], true)
+        const sub = convert(innerPath, { [subKey]: params[subKey] }, [], true, options)
         return `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
       }).join(' AND ') + ')'
     }
   } else {
-    const sub = convert(innerPath, value, [], true)
+    const sub = convert(innerPath, value, [], true, options)
     arrayQuery = `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
   }
   if (!arrayQuery || arrayQuery === '()') {
@@ -91,17 +91,17 @@ function createElementOrArrayQuery(path, op, value, parent, arrayPathStr) {
  * @param parent {mixed} parent[path] = value
  * @param arrayPaths {Array} List of dotted paths that possibly need to be handled as arrays.
  */
-function convertOp(path, op, value, parent, arrayPaths) {
+function convertOp(path, op, value, parent, arrayPaths, options) {
   const arrayPath = getMatchingArrayPath(op, arrayPaths)
   // It seems like direct matches shouldn't be array fields, but 2D arrays are possible in MongoDB
   // I will need to do more testing to see if we should handle this case differently.
   // const arrayDirectMatch = !isSpecialOp(op) && Array.isArray(value)
   if (arrayPath) {
-    return createElementOrArrayQuery(path, op, value, parent, arrayPath)
+    return createElementOrArrayQuery(path, op, value, parent, arrayPath, options)
   }
   switch(op) {
     case '$not':
-      return '(NOT ' + convert(path, value) + ')'
+      return '(NOT ' + convert(path, value, undefined, false, options) + ')'
     case '$nor': {
       for (const v of value) {
         if (typeof v !== 'object') {
@@ -124,11 +124,11 @@ function convertOp(path, op, value, parent, arrayPaths) {
             throw new Error('$or/$and/$nor entries need to be full objects')
           }
         }
-        return '(' + value.map((subquery) => convert(path, subquery, arrayPaths)).join(op === '$or' ? ' OR ' : ' AND ') + ')'
+        return '(' + value.map((subquery) => convert(path, subquery, arrayPaths, false, options)).join(op === '$or' ? ' OR ' : ' AND ') + ')'
       }
     // TODO (make sure this handles multiple elements correctly)
     case '$elemMatch':
-      return convert(path, value, arrayPaths)
+      return convert(path, value, arrayPaths, false, options)
       //return util.pathToText(path, false) + ' @> \'' + util.stringEscape(JSON.stringify(value)) + '\'::jsonb'
     case '$in':
     case '$nin': {
@@ -136,7 +136,7 @@ function convertOp(path, op, value, parent, arrayPaths) {
         return 'FALSE'
       }
       if (value.length === 1) {
-        return convert(path, value[0], arrayPaths)
+        return convert(path, value[0], arrayPaths, false, options)
       }
       const cleanedValue = value.filter((v) => (v !== null && typeof v !== 'undefined'))
       let partial = util.pathToText(path, typeof value[0] == 'string') + (op == '$nin' ? ' NOT' : '') + ' IN (' + cleanedValue.map(util.quote).join(', ') + ')'
@@ -172,15 +172,15 @@ function convertOp(path, op, value, parent, arrayPaths) {
     case '$eq':  {
       const isSimpleComparision = (op === '$eq' || op === '$ne')
       const pathContainsArrayAccess = path.some((key) => /^\d+$/.test(key))
-      // if (isSimpleComparision && !pathContainsArrayAccess) {
-      //   // create containment query since these can use GIN indexes
-      //   // See docs here, https://www.postgresql.org/docs/9.4/datatype-json.html#JSON-INDEXING
-      //   const [head, ...tail] = path
-      //   return `${op=='$ne' ? 'NOT ' : ''}${head} @> ` + util.pathToObject([...tail, value])
-      // } else {
-      var text = util.pathToText(path, typeof value == 'string')
-      return text + OPS[op] + util.quote(value)
-      // }
+      if (isSimpleComparision && !pathContainsArrayAccess && !options.disableContainmentQuery) {
+        // create containment query since these can use GIN indexes
+        // See docs here, https://www.postgresql.org/docs/9.4/datatype-json.html#JSON-INDEXING
+        const [head, ...tail] = path
+        return `${op=='$ne' ? 'NOT ' : ''}${head} @> ` + util.pathToObject([...tail, value])
+      } else {
+        var text = util.pathToText(path, typeof value == 'string')
+        return text + OPS[op] + util.quote(value)
+      }
     }
     case '$type': {
       const text = util.pathToText(path, false)
@@ -213,7 +213,7 @@ function convertOp(path, op, value, parent, arrayPaths) {
     }
     default:
       // this is likely a top level field, recurse
-      return convert(path.concat(op.split('.')), value)
+      return convert(path.concat(op.split('.')), value, undefined, false, options)
   }
 }
 
@@ -236,7 +236,7 @@ function getSpecialKeys(path, query, forceExact) {
  * @param forceExact {Boolean} When true, an exact match will be required.
  * @returns The corresponding PSQL expression
  */
-var convert = function (path, query, arrayPaths, forceExact=false) {
+var convert = function (path, query, arrayPaths, forceExact, options) {
   if (typeof query === 'string' || typeof query === 'boolean' || typeof query == 'number' || Array.isArray(query)) {
     return convertOp(path, '$eq', query, {}, arrayPaths)
   }
@@ -271,8 +271,8 @@ var convert = function (path, query, arrayPaths, forceExact=false) {
   }
 }
 
-module.exports = function (fieldName, query, arrays) {
-  return convert([fieldName], query, arrays || [])
+module.exports = function (fieldName, query, arrays, options) {
+  return convert([fieldName], query, arrays || [], false, options)
 }
 module.exports.convertDotNotation = util.convertDotNotation
 module.exports.pathToText = util.pathToText
